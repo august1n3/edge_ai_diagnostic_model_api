@@ -1,0 +1,15 @@
+# Test your FastAPI endpoints
+
+### Analyze Therapeutics Request
+POST http://localhost:8000/analyze/therapeutics
+Content-Type: application/json
+Accept: application/json
+
+{
+  "task_name": "BBB_Martins",
+  "drug_smiles": "C1=CC=C(C=C1)C(C2=CC=CC=C2)O",
+  "prompt_template": "Instructions: Answer the following question about drug properties.\nContext: As a membrane separating circulating blood and brain extracellular fluid, the blood-brain barrier (BBB) is the protection layer that blocks most foreign drugs. Thus the ability of a drug to penetrate the barrier to deliver to the site of action forms a crucial challenge in development of drugs for central nervous system.\nQuestion: Given a drug SMILES string, predict whether it\n(A) does not cross the BBB (B) crosses the BBB\nDrug SMILES: {Drug SMILES}\nAnswer:",
+  "additional_question": [
+    "Explain your reasoning."
+  ]
+}
