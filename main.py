@@ -10,7 +10,10 @@ from transformers import (
     AutoModel,
     AutoTokenizer,
     AutoModelForCausalLM,
-    BitsAndBytesConfig
+    BitsAndBytesConfig,
+    GenerationConfig,
+    StoppingCriteriaList,
+    BatchEncoding
 )
 
 # --- CONFIGURATION ---
@@ -46,7 +49,7 @@ async def lifespan(app: FastAPI):
     # 2. Load TxGemma (Therapeutics) from Local Disk
     # Note: Even though it's saved locally, we re-supply the quantization config
     # to ensure it loads into 4-bit VRAM correctly.
-    if DEVICE == "cuda":
+    if DEVICE != "cuda":
         print(f"📂 Loading TxGemma from {TXGEMMA_PATH}...")
         quantization_config = BitsAndBytesConfig(
             load_in_4bit=True,
@@ -78,7 +81,7 @@ async def lifespan(app: FastAPI):
 
 
 # --- API SETUP ---
-app = FastAPI(title="Edge AI Diagnostic Assistant (Local)", lifespan=lifespan)
+app = FastAPI(title="Edge AI Diagnostic Assistant API (Local)", lifespan=lifespan)
 
 
 # --- DATA MODELS ---
@@ -151,6 +154,11 @@ async def analyze_therapeutics(request: TherapeuticRequest):
         tokenizer = ml_models["text_tokenizer"]
         model = ml_models["text_model"]
 
+        # 1. Force-Fix Pad Token
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+            tokenizer.pad_token_id = tokenizer.eos_token_id
+
         # Format prompt
         input_placeholder = "{Drug SMILES}"
         if input_placeholder in request.prompt_template:
@@ -165,27 +173,62 @@ async def analyze_therapeutics(request: TherapeuticRequest):
         history = []
         results = []
 
-        # Generate responses
+        # 2. Define Clean Config
+        gen_config = GenerationConfig(
+            max_new_tokens=512,
+            do_sample=True,
+            temperature=0.7,
+            pad_token_id=tokenizer.pad_token_id,
+            eos_token_id=tokenizer.eos_token_id
+        )
+
         for q in questions:
             history.append({"role": "user", "content": q})
 
-            # Create chat template input
-            input_ids = tokenizer.apply_chat_template(
-                history,
-                tokenize=True,
-                add_generation_prompt=True,
-                return_tensors="pt"
-            ).to(model.device)
+            print(f"🔹 Processing input for: {q[:20]}...")
+
+            # --- STEP 3: Generate Inputs ---
+            try:
+                # Attempt to use chat template
+                inputs = tokenizer.apply_chat_template(
+                    history,
+                    tokenize=True,
+                    add_generation_prompt=True,
+                    return_tensors="pt"
+                )
+            except Exception as template_error:
+                print(f"⚠️ Template failed ({template_error}), using fallback.")
+                text_input = f"<start_of_turn>user\n{q}<end_of_turn>\n<start_of_turn>model\n"
+                inputs = tokenizer(text_input, return_tensors="pt")
+
+            # --- STEP 4: EXTRACT TENSOR (The Fix for your Error) ---
+            # If 'inputs' is a dictionary/BatchEncoding, extract 'input_ids'
+            if isinstance(inputs, (dict, BatchEncoding)):
+                input_ids = inputs["input_ids"]
+            else:
+                input_ids = inputs
+
+            # Ensure it is on the correct device (GPU)
+            input_ids = input_ids.to(model.device)
+
+            # --- STEP 5: Create Attention Mask ---
+            # Now 'input_ids' is guaranteed to be a Tensor, so .ne() will work
+            attention_mask = input_ids.ne(tokenizer.pad_token_id).long()
+
+            print(f"🔹 Generating... (Shape: {input_ids.shape})")
 
             with torch.no_grad():
                 outputs = model.generate(
                     input_ids=input_ids,
-                    max_new_tokens=512,
-                    do_sample=True,
-                    temperature=0.7
+                    attention_mask=attention_mask,
+                    generation_config=gen_config,
+                    stopping_criteria=StoppingCriteriaList([]),  # Force clear "Enough thinking"
+                    return_dict_in_generate=False
                 )
 
+            # Decode
             response = tokenizer.decode(outputs[0][len(input_ids[0]):], skip_special_tokens=True)
+            print("✅ Done.")
 
             history.append({"role": "assistant", "content": response})
             results.append({"question": q, "response": response})
@@ -193,8 +236,10 @@ async def analyze_therapeutics(request: TherapeuticRequest):
         return {"drug_smiles": request.drug_smiles, "analysis_results": results}
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Therapeutic analysis error: {str(e)}")
-
+        print(f"❌ ERROR: {type(e).__name__} | {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
