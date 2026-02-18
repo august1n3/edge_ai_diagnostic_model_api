@@ -16,6 +16,9 @@ from transformers import (
     BatchEncoding
 )
 
+from fastapi.middleware.cors import CORSMiddleware
+
+
 # --- CONFIGURATION ---
 # We use the local paths where the kaggle download command saved the models
 MEDSIGLIP_PATH = "./kaggle_output/ml_engine/local_medsiglip"
@@ -82,7 +85,18 @@ async def lifespan(app: FastAPI):
 
 # --- API SETUP ---
 app = FastAPI(title="Edge AI Diagnostic Assistant API (Local)", lifespan=lifespan)
+origins = [
+    "http://localhost:3000",
+    "https://your-frontend-domain.com",
+]
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,          # List of allowed origins
+    allow_credentials=True,         # Allow cookies to be included in requests
+    allow_methods=["*"],            # Allow all methods (GET, POST, PUT, etc.)
+    allow_headers=["*"],            # Allow all headers
+)
 
 # --- DATA MODELS ---
 class TherapeuticRequest(BaseModel):
